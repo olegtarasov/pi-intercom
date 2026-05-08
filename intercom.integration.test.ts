@@ -497,6 +497,64 @@ test("busy interactive sessions request detach for blocking subagent supervisor 
   }
 });
 
+test("busy interactive sessions follow up blocking supervisor asks when detach is unavailable", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  let idle = false;
+  const harness = createExtensionHarness("interactive-parent", {
+    hasUI: true,
+    isIdle: () => idle,
+  });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+
+    const detachSeen = new Promise<unknown>((resolve) => {
+      harness.pi.events.on("pi-intercom:detach-request", (payload: unknown) => {
+        resolve(payload);
+      });
+    });
+
+    const target = await waitForSessionByName(planner, "interactive-parent");
+    const delivered = await planner.send(target.id, {
+      messageId: "subagent-supervisor-ask-no-detach",
+      text: [
+        "Subagent needs a supervisor decision.",
+        "Run: 78f659a3",
+        "Agent: worker",
+        "Child index: 0",
+        "Child intercom target: subagent-worker-78f659a3-1",
+        "",
+        "Should I return the report content in final?",
+      ].join("\n"),
+      expectsReply: true,
+    });
+    assert.equal(delivered.delivered, true);
+
+    const detachPayload = await detachSeen as { requestId?: string; message?: Message; bodyText?: string };
+    assert.equal(typeof detachPayload.requestId, "string");
+    assert.equal(detachPayload.message?.id, "subagent-supervisor-ask-no-detach");
+    assert.match(detachPayload.bodyText ?? "", /Subagent needs a supervisor decision/);
+
+    await new Promise((resolve) => setTimeout(resolve, 650));
+
+    assert.equal(harness.sentMessages.length, 1);
+    assert.equal(harness.sentMessages[0]?.message.customType, "intercom_message");
+    assert.equal(harness.sentMessages[0]?.options?.deliverAs, "followUp");
+    assert.match(harness.sentMessages[0]?.message.content ?? "", /Should I return the report content in final/);
+
+    idle = true;
+    await harness.emitLifecycle("agent_end");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(harness.sentMessages.length, 1, "followed-up supervisor ask should not be delivered twice after idle");
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("busy interactive sessions request detach for blocking asks from named subagents", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { planner, cleanup } = await setupClients();

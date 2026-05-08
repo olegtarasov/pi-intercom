@@ -740,7 +740,25 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           return;
         }
         if (isBlockingSubagentSupervisorAsk(entry)) {
-          await requestSubagentIntercomDetach(entry);
+          const detached = await requestSubagentIntercomDetach(entry);
+          const contextAfterDetach = getLiveContext(liveContext, messageGeneration);
+          if (!contextAfterDetach) {
+            return;
+          }
+          if (!detached) {
+            let isIdleAfterDetach: boolean;
+            try {
+              isIdleAfterDetach = contextAfterDetach.isIdle();
+            } catch {
+              return;
+            }
+            if (isIdleAfterDetach) {
+              sendIncomingMessage(entry, "trigger", messageGeneration);
+            } else {
+              sendIncomingMessage(entry, "followUp", messageGeneration);
+            }
+            return;
+          }
         }
         queueIdleMessage(entry);
         return;
