@@ -436,6 +436,67 @@ test("busy interactive sessions idle-gate top-level asks without aborting", { co
   }
 });
 
+test("busy interactive sessions request detach for blocking subagent supervisor asks", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  let idle = false;
+  const harness = createExtensionHarness("interactive-parent", {
+    hasUI: true,
+    isIdle: () => idle,
+  });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+
+    const detachSeen = new Promise<unknown>((resolve) => {
+      harness.pi.events.on("pi-intercom:detach-request", (payload: unknown) => {
+        const requestId = (payload as { requestId?: unknown })?.requestId;
+        if (typeof requestId === "string") {
+          harness.pi.events.emit("pi-intercom:detach-response", { requestId, accepted: true });
+        }
+        resolve(payload);
+      });
+    });
+
+    const target = await waitForSessionByName(planner, "interactive-parent");
+    const delivered = await planner.send(target.id, {
+      messageId: "subagent-supervisor-ask",
+      text: [
+        "Subagent needs a supervisor decision.",
+        "Run: 78f659a3",
+        "Agent: worker",
+        "Child index: 0",
+        "Child intercom target: subagent-worker-78f659a3-1",
+        "",
+        "Which API should I use?",
+      ].join("\n"),
+      expectsReply: true,
+    });
+    assert.equal(delivered.delivered, true);
+
+    const detachPayload = await detachSeen as { requestId?: string; message?: Message; bodyText?: string };
+    assert.equal(typeof detachPayload.requestId, "string");
+    assert.equal(detachPayload.message?.id, "subagent-supervisor-ask");
+    assert.match(detachPayload.bodyText ?? "", /Subagent needs a supervisor decision/);
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(harness.sentMessages.length, 0, "supervisor ask should stay queued while parent is busy");
+
+    idle = true;
+    await harness.emitLifecycle("agent_end");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(harness.sentMessages.length, 1);
+    assert.equal(harness.sentMessages[0]?.message.customType, "intercom_message");
+    assert.equal(harness.sentMessages[0]?.options?.triggerTurn, true);
+    assert.match(harness.sentMessages[0]?.message.content ?? "", /Which API should I use/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("deferred startup connect is cancelled on shutdown", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { planner, cleanup } = await setupClients();
