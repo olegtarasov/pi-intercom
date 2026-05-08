@@ -497,6 +497,97 @@ test("busy interactive sessions request detach for blocking subagent supervisor 
   }
 });
 
+test("busy interactive sessions request detach for blocking asks from named subagents", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  let idle = false;
+  const harness = createExtensionHarness("interactive-parent", {
+    hasUI: true,
+    isIdle: () => idle,
+  });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+
+    const detachSeen = new Promise<unknown>((resolve) => {
+      harness.pi.events.on("pi-intercom:detach-request", (payload: unknown) => {
+        const requestId = (payload as { requestId?: unknown })?.requestId;
+        if (typeof requestId === "string") {
+          harness.pi.events.emit("pi-intercom:detach-response", { requestId, accepted: true });
+        }
+        resolve(payload);
+      });
+    });
+
+    const subagent = new IntercomClient();
+    await subagent.connect({
+      name: "subagent-context-builder-78f659a3-1",
+      cwd: repoDir,
+      model: "test-model",
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastActivity: Date.now(),
+    });
+
+    try {
+      const target = await waitForSessionByName(planner, "interactive-parent");
+      const delivered = await subagent.send(target.id, {
+        messageId: "subagent-generic-ask",
+        text: "I am blocked on a write-only handoff. Should I return the report content in final?",
+        expectsReply: true,
+      });
+      assert.equal(delivered.delivered, true);
+
+      const detachPayload = await detachSeen as { requestId?: string; from?: SessionInfo; message?: Message; bodyText?: string };
+      assert.equal(typeof detachPayload.requestId, "string");
+      assert.equal(detachPayload.from?.name, "subagent-context-builder-78f659a3-1");
+      assert.equal(detachPayload.message?.id, "subagent-generic-ask");
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(harness.sentMessages.length, 0, "blocking ask should stay queued while parent is busy");
+
+      idle = true;
+      await harness.emitLifecycle("agent_end");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      assert.equal(harness.sentMessages.length, 1);
+      assert.equal(harness.sentMessages[0]?.message.customType, "intercom_message");
+      assert.match(harness.sentMessages[0]?.message.content ?? "", /write-only handoff/);
+    } finally {
+      await subagent.disconnect();
+    }
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("presence identity prefers subagent intercom session name from env", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+
+  try {
+    await withChildOrchestratorEnv({
+      sessionName: "subagent-worker-78f659a3-1",
+    }, async () => {
+      const harness = createExtensionHarness("default-session-name");
+      try {
+        piIntercomExtension(harness.pi as never);
+        await harness.emitLifecycle("session_start");
+
+        await waitForSessionByName(planner, "subagent-worker-78f659a3-1");
+        const sessions = await planner.listSessions();
+        assert.equal(sessions.some((session) => session.name === "default-session-name"), false);
+      } finally {
+        await harness.emitLifecycle("session_shutdown");
+      }
+    });
+  } finally {
+    await cleanup();
+  }
+});
+
 test("deferred startup connect is cancelled on shutdown", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { planner, cleanup } = await setupClients();

@@ -379,9 +379,12 @@ function resolveIntercomPresenceName(sessionName: string | undefined, sessionId:
   const normalizedSessionId = sessionId.startsWith("session-") ? sessionId.slice("session-".length) : sessionId;
   return `${DEFAULT_UNNAMED_SESSION_ALIAS_PREFIX}-${normalizedSessionId.slice(0, 8)}`;
 }
+function resolveEnvironmentSessionName(): string | undefined {
+  return process.env[SUBAGENT_INTERCOM_SESSION_NAME_ENV]?.trim() || undefined;
+}
 function buildPresenceIdentity(pi: ExtensionAPI, sessionId: string): { name: string } {
   return {
-    name: resolveIntercomPresenceName(pi.getSessionName(), sessionId),
+    name: resolveIntercomPresenceName(resolveEnvironmentSessionName() ?? pi.getSessionName(), sessionId),
   };
 }
 function formatSessionLabel(session: SessionInfo, duplicates: Set<string>): string {
@@ -644,7 +647,18 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       return false;
     }
     return entry.bodyText.includes("Subagent needs a supervisor decision.")
-      || entry.bodyText.includes("Subagent requests a structured supervisor interview.");
+      || entry.bodyText.includes("Subagent requests a structured supervisor interview.")
+      || isNamedSubagentBlockingAsk(entry);
+  }
+  function isNamedSubagentBlockingAsk(entry: InboundMessageEntry): boolean {
+    const name = entry.from.name?.trim().toLowerCase();
+    if (!name) {
+      return false;
+    }
+    if (/^subagent-chat-[0-9a-f]{8}$/.test(name)) {
+      return false;
+    }
+    return /^subagent-.+-[0-9a-f]{8}(?:-\d+)?$/.test(name);
   }
   function requestSubagentIntercomDetach(entry: InboundMessageEntry): Promise<boolean> {
     const requestId = randomUUID();
